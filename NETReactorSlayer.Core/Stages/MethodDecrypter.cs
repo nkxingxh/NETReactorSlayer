@@ -85,23 +85,31 @@ namespace NETReactorSlayer.Core.Stages
 
         private bool Find2()
         {
-            var cctor = Context.Module.GlobalType.FindStaticConstructor();
-            if (cctor is not { HasBody: true } || !cctor.Body.HasInstructions)
-                return false;
-            foreach (var instr in cctor.Body.Instructions.Where(instr => instr.OpCode.Equals(OpCodes.Call)))
-                if (instr.Operand is MethodDef { DeclaringType: { }, HasBody: true } methodDef &&
-                    methodDef.Body.HasInstructions)
-                    if (DotNetUtils.GetMethod(methodDef.DeclaringType,
-                            "System.Security.Cryptography.SymmetricAlgorithm", "()") != null)
-                    {
-                        if (!EncryptedResource.IsKnownDecrypter(methodDef, Array.Empty<string>(), true))
-                            continue;
+            var staticConstructors = new[]
+            {
+                Context.Module.EntryPoint?.DeclaringType?.FindStaticConstructor(),
+                Context.Module.GlobalType.FindStaticConstructor()
+            };
 
-                        _encryptedResource = new EncryptedResource(Context, methodDef);
-                        if (_encryptedResource.EmbeddedResource != null)
-                            return true;
-                        _encryptedResource.Dispose();
-                    }
+            foreach (var cctor in staticConstructors)
+            {
+                if (cctor is not { HasBody: true } || !cctor.Body.HasInstructions)
+                    return false;
+                foreach (var instr in cctor.Body.Instructions.Where(instr => instr.OpCode.Equals(OpCodes.Call)))
+                    if (instr.Operand is MethodDef { DeclaringType: not null, HasBody: true } methodDef &&
+                        methodDef.Body.HasInstructions)
+                        if (DotNetUtils.GetMethod(methodDef.DeclaringType,
+                                "System.Security.Cryptography.SymmetricAlgorithm", "()") != null)
+                        {
+                            if (!EncryptedResource.IsKnownDecrypter(methodDef, Array.Empty<string>(), true))
+                                continue;
+
+                            _encryptedResource = new EncryptedResource(Context, methodDef);
+                            if (_encryptedResource.EmbeddedResource != null)
+                                return true;
+                            _encryptedResource.Dispose();
+                        }
+            }
 
             return false;
         }
