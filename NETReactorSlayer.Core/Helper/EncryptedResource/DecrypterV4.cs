@@ -108,10 +108,13 @@ internal partial class EncryptedResource
         private bool FindNetCoreDecrypterMethod(MethodDef method)
         {
             var instrs = method.Body.Instructions;
-            for (var i = 0; i < instrs.Count; i++)
+            for (var i = 0; i < instrs.Count - 5; i++)
             {
-                if (instrs[i].OpCode != OpCodes.Ldtoken)
-                    continue;
+                //this was not working with anti tamper enabled
+                //The instruction is modified in a later stage when enabled
+                //if (instrs[i].OpCode != OpCodes.Ldtoken) 
+                //    continue;
+                
                 if (instrs[i + 1].OpCode != OpCodes.Call)
                     continue;
                 if (instrs[i + 2].OpCode != OpCodes.Call)
