@@ -1,6 +1,7 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Text;
 using de4dot.blocks.cflow;
 using dnlib.DotNet;
 using dnlib.DotNet.Emit;
@@ -22,7 +23,8 @@ internal partial class EncryptedResource
             _key = GetDecryptionKey(_decrypterMethod);
             _iv = GetDecryptionIV(_decrypterMethod);
             _locals = new List<Local>(_emuMethod.Body.Variables);
-            if (!Initialize())
+            
+            if (!Initialize() && !InitializeNetCore())
                 throw new ApplicationException("Could not initialize decrypter");
         }
 
@@ -54,14 +56,32 @@ internal partial class EncryptedResource
             uint sum = 0;
             for (var i = 0; i < encrypted.Length; i += 4)
             {
-                sum = CalculateMagic(sum + ReadUInt32(_key, i % _key.Length));
-                WriteUInt32(decrypted, i, sum ^ ReadUInt32(encrypted, i));
+                if (_netCoreDecrypterVersion)
+                {
+                    var value = ReadUInt32(_key, i % _key.Length);
+                    sum += value + CalculateMagic(sum + value);
+                    WriteUInt32(decrypted, i, sum ^ ReadUInt32(encrypted, i));
+                }
+                else
+                {
+                    sum = CalculateMagic(sum + ReadUInt32(_key, i % _key.Length));
+                    WriteUInt32(decrypted, i, sum ^ ReadUInt32(encrypted, i));
+                }
+
             }
+
+            var debugStringValues = Encoding.Unicode.GetString(decrypted);
 
             return decrypted;
         }
 
         private bool FindDecrypterMethod(MethodDef method)
+        {
+            return FindNetFrameworkDecrypterMethod(method) ||
+                   FindNetCoreDecrypterMethod(method);
+        }
+        
+        private bool FindNetFrameworkDecrypterMethod(MethodDef method)
         {
             var instrs = method.Body.Instructions;
             for (var i = 0; i < instrs.Count; i++)
@@ -84,8 +104,43 @@ internal partial class EncryptedResource
 
             return false;
         }
+        
+        private bool FindNetCoreDecrypterMethod(MethodDef method)
+        {
+            var instrs = method.Body.Instructions;
+            for (var i = 0; i < instrs.Count; i++)
+            {
+                if (instrs[i].OpCode != OpCodes.Ldtoken)
+                    continue;
+                if (instrs[i + 1].OpCode != OpCodes.Call)
+                    continue;
+                if (instrs[i + 2].OpCode != OpCodes.Call)
+                    continue;
+                if (instrs[i + 3].OpCode != OpCodes.Callvirt)
+                    continue;
+                if (instrs[i + 4].OpCode != OpCodes.Ldstr)
+                    continue;
+                if (instrs[i + 5].OpCode != OpCodes.Callvirt)
+                    continue;
+                var call = instrs[i + 6];
+                if (call.OpCode != OpCodes.Call)
+                    continue;
+
+                _decrypterMethod = call.Operand as MethodDef;
+                _netCoreDecrypterVersion = true;
+                return true;
+            }
+
+            return false;
+        }
 
         private bool FindEmulateMethod(MethodDef method)
+        {
+            return FindNetFrameworkEmulateMethod(method) ||
+                   FindNetCoreEmulateMethod(method);
+        }
+        
+        private bool FindNetFrameworkEmulateMethod(MethodDef method)
         {
             var instrs = method.Body.Instructions;
             for (var i = 0; i < instrs.Count; i++)
@@ -99,6 +154,26 @@ internal partial class EncryptedResource
                 if (!instrs[i + 3].IsLdloc())
                     continue;
                 var call = instrs[i + 4];
+                if (call.OpCode != OpCodes.Call)
+                    continue;
+
+                _emuMethod = call.Operand as MethodDef;
+                return true;
+            }
+
+            return false;
+        }
+        
+        private bool FindNetCoreEmulateMethod(MethodDef method)
+        {
+            var instrs = method.Body.Instructions;
+            for (var i = 0; i < instrs.Count; i++)
+            {
+                if (instrs[i].OpCode != OpCodes.Newobj)
+                    continue;
+                if (!instrs[i + 1].IsLdloc())
+                    continue;
+                var call = instrs[i + 2];
                 if (call.OpCode != OpCodes.Call)
                     continue;
 
@@ -124,6 +199,24 @@ internal partial class EncryptedResource
             _instructions = new List<Instruction>(count);
             for (var i = 0; i < count; i++)
                 _instructions.Add(origInstrs[emuStartIndex + i].Clone());
+
+            return true;
+        }
+        
+        private bool InitializeNetCore()
+        {
+            var origInstrs = _emuMethod.Body.Instructions;
+
+            if (origInstrs.FirstOrDefault(x => x.OpCode.Equals(OpCodes.Call))?.Operand is not MethodDef magicMethod)
+                return false;
+
+            _emuMethod = magicMethod;
+            _emuParameter = magicMethod.Parameters[1];
+            _instructions = [];
+            foreach (var instr in magicMethod.Body.Instructions)
+            {
+                _instructions.Add(instr.Clone());
+            }
 
             return true;
         }
@@ -292,7 +385,8 @@ internal partial class EncryptedResource
         {
             _instrEmulator.Initialize(_emuMethod, _emuMethod.Parameters, _locals, _emuMethod.Body.InitLocals,
                 false);
-            _instrEmulator.SetLocal(_emuLocal, new Int32Value((int)input));
+            if (_emuLocal != null) _instrEmulator.SetLocal(_emuLocal, new Int32Value((int) input));
+            if (_emuParameter != null) _instrEmulator.SetArg(_emuParameter, new Int32Value((int) input));
 
             var index = 0;
             while (index < _instructions.Count)
@@ -386,6 +480,8 @@ internal partial class EncryptedResource
         private readonly List<Local> _locals;
         private readonly InstructionEmulator _instrEmulator = new();
         private Local _emuLocal;
+        private Parameter _emuParameter;
+        private bool _netCoreDecrypterVersion = false;
         private DecrypterVersion _decrypterVersion = DecrypterVersion.V6X;
     }
 }
